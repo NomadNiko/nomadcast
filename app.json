@@ -70,7 +70,24 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "ba2ddd4a-7e97-4c05-8c02-2f12b5fc296d"
+        "projectId": "ba2ddd4a-7e97-4c05-8c02-2f12b5fc296d",
+        "build": {
+          "experimental": {
+            "ios": {
+              "appExtensions": [
+                {
+                  "targetName": "BroadcastExtension",
+                  "bundleIdentifier": "com.devnomad.nomadcast.BroadcastExtension",
+                  "entitlements": {
+                    "com.apple.security.application-groups": [
+                      "group.com.devnomad.nomadcast.broadcast"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
       }
     }
   }
