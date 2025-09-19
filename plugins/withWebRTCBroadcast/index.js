@@ -96,20 +96,34 @@ const withWebRTCBroadcast = (config) => {
 </plist>`
       );
 
-      // Create SampleHandler.swift
+      // Create SampleHandler.swift with WebRTC streaming
       await fs.promises.writeFile(
         path.join(extensionPath, "SampleHandler.swift"),
         `import ReplayKit
+import VideoToolbox
 
 class SampleHandler: RPBroadcastSampleHandler {
     private let appGroup = "${APP_GROUP}"
+    private var socketConnection: SocketConnection?
+    private var serverIP: String?
+    private var serverPort: Int = 8877
 
     override func broadcastStarted(withSetupInfo setupInfo: [String : NSObject]?) {
         super.broadcastStarted(withSetupInfo: setupInfo)
-        
+
+        // Get server info from app group
         if let sharedDefaults = UserDefaults(suiteName: appGroup) {
             sharedDefaults.set(true, forKey: "broadcasting")
+            serverIP = sharedDefaults.string(forKey: "serverIP")
+            serverPort = sharedDefaults.integer(forKey: "serverPort")
+            if serverPort == 0 { serverPort = 8877 }
             sharedDefaults.synchronize()
+        }
+
+        // Connect to server
+        if let ip = serverIP {
+            socketConnection = SocketConnection(host: ip, port: serverPort)
+            socketConnection?.connect()
         }
     }
 
@@ -118,10 +132,77 @@ class SampleHandler: RPBroadcastSampleHandler {
             sharedDefaults.set(false, forKey: "broadcasting")
             sharedDefaults.synchronize()
         }
+
+        socketConnection?.disconnect()
+        socketConnection = nil
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
-        // Process sample buffer here
+        switch sampleBufferType {
+        case .video:
+            // Send video frames only
+            if let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                sendVideoFrame(imageBuffer)
+            }
+        default:
+            break
+        }
+    }
+
+    private func sendVideoFrame(_ pixelBuffer: CVPixelBuffer) {
+        // Convert to JPEG for simple transmission
+        guard let jpegData = pixelBufferToJPEG(pixelBuffer) else { return }
+
+        // Send frame size first (4 bytes), then data
+        var frameSize = UInt32(jpegData.count).bigEndian
+        let sizeData = Data(bytes: &frameSize, count: 4)
+
+        socketConnection?.send(data: sizeData + jpegData)
+    }
+
+    private func pixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+
+        let uiImage = UIImage(cgImage: cgImage)
+        return uiImage.jpegData(compressionQuality: 0.5)
+    }
+}
+
+// Simple socket connection
+class SocketConnection {
+    private var inputStream: InputStream?
+    private var outputStream: OutputStream?
+    private let host: String
+    private let port: Int
+
+    init(host: String, port: Int) {
+        self.host = host
+        self.port = port
+    }
+
+    func connect() {
+        Stream.getStreamsToHost(withName: host, port: port, inputStream: &inputStream, outputStream: &outputStream)
+
+        inputStream?.open()
+        outputStream?.open()
+    }
+
+    func send(data: Data) {
+        guard let outputStream = outputStream else { return }
+
+        data.withUnsafeBytes { bytes in
+            outputStream.write(bytes.bindMemory(to: UInt8.self).baseAddress!, maxLength: data.count)
+        }
+    }
+
+    func disconnect() {
+        inputStream?.close()
+        outputStream?.close()
+        inputStream = nil
+        outputStream = nil
     }
 }`
       );
