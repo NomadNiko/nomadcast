@@ -9,7 +9,29 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.devnomad.nomadcast",
+      "buildNumber": "1",
+      "appleTeamId": "843CNLD5C9",
+      "entitlements": {
+        "com.apple.security.application-groups": [
+          "group.com.devnomad.nomadcast.broadcast"
+        ]
+      },
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSMicrophoneUsageDescription": "NomadCast needs microphone access to include audio in your broadcasts",
+        "NSCameraUsageDescription": "NomadCast needs camera access for video broadcasts",
+        "NSLocalNetworkUsageDescription": "NomadCast needs local network access to connect to your signaling server",
+        "NSBonjourServices": [
+          "_nomadcast._tcp",
+          "_nomadcast._udp"
+        ],
+        "UIBackgroundModes": [
+          "audio",
+          "voip"
+        ]
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -38,11 +60,18 @@
             "backgroundColor": "#000000"
           }
         }
-      ]
+      ],
+      "./plugins/withWebRTCBroadcast"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "ba2ddd4a-7e97-4c05-8c02-2f12b5fc296d"
+      }
     }
   }
 }
