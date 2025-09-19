@@ -20,44 +20,66 @@ const withWebRTCBroadcast = (config) => {
     return config;
   });
 
-  // Create extension files and configure Podfile
+  // Create extension files FIRST
   config = withDangerousMod(config, [
     "ios",
     async (config) => {
       await createExtensionFiles(config);
-      await configurePodfile(config);
       return config;
     },
   ]);
 
-  // Configure Xcode project
+  // Configure Xcode project with proper embedding
   config = withXcodeProject(config, (config) => {
     const xcodeProject = config.modResults;
-    addBroadcastExtension(xcodeProject);
+    const appName = config.name;
+    addBroadcastExtensionWithEmbedding(xcodeProject, appName);
     return config;
   });
+
+  // Fix Podfile LAST
+  config = withDangerousMod(config, [
+    "ios",
+    async (config) => {
+      await fixPodfileForExtension(config);
+      return config;
+    },
+  ]);
 
   return config;
 };
 
-function addBroadcastExtension(xcodeProject) {
+function addBroadcastExtensionWithEmbedding(xcodeProject, appName) {
+  // Check if extension already exists
   if (xcodeProject.pbxTargetByName(EXTENSION_NAME)) {
     console.log(`${EXTENSION_NAME} target already exists.`);
     return;
   }
 
+  // Add the extension target
   const target = xcodeProject.addTarget(
     EXTENSION_NAME,
     "app_extension",
     EXTENSION_NAME,
-    `${EXTENSION_NAME}`
+    `${appName}/${EXTENSION_NAME}` // Important: Use app name in path
   );
 
   const projectUuid = xcodeProject.getFirstProject().uuid;
   const targetUuid = target.uuid;
-  const mainTargetUuid = xcodeProject.getFirstTarget().uuid;
+  const mainTarget = xcodeProject.getFirstTarget();
+  const mainTargetUuid = mainTarget.uuid;
 
-  // Configure target attributes for proper signing
+  // CRITICAL: Add the extension to the main app's embedded app extensions
+  xcodeProject.addBuildPhase(
+    [`${EXTENSION_NAME}.appex`],
+    "PBXCopyFilesBuildPhase",
+    "Embed App Extensions",
+    mainTargetUuid,
+    "app_extension",
+    "13" // destination: PlugIns folder
+  );
+
+  // Configure target attributes
   if (
     !xcodeProject.pbxProjectSection()[projectUuid].attributes.TargetAttributes
   ) {
@@ -87,18 +109,21 @@ function addBroadcastExtension(xcodeProject) {
   }
   targetAttributes[mainTargetUuid].SystemCapabilities[
     "com.apple.ApplicationGroups.iOS"
-  ] = { enabled: 1 };
+  ] = {
+    enabled: 1,
+  };
+
+  // Add dependency from main app to extension
+  xcodeProject.addTargetDependency(mainTargetUuid, [targetUuid]);
 
   // Add frameworks
   xcodeProject.addFramework("ReplayKit.framework", { target: targetUuid });
-  xcodeProject.addFramework("Network.framework", { target: targetUuid });
 
-  // Configure build settings properly - FIXED SYNTAX HERE
+  // Configure build settings
   const configurations = xcodeProject.pbxXCBuildConfigurationSection();
   for (const key in configurations) {
     const config = configurations[key];
     if (config && config.buildSettings && !key.endsWith("_comment")) {
-      // Get the build configuration list for the extension
       const extensionTarget = xcodeProject.pbxTargetByName(EXTENSION_NAME);
       if (extensionTarget && extensionTarget.buildConfigurationList) {
         const configList =
@@ -119,12 +144,10 @@ function addBroadcastExtension(xcodeProject) {
               IPHONEOS_DEPLOYMENT_TARGET: "14.0",
               DEVELOPMENT_TEAM: TEAM_ID,
               CODE_SIGN_STYLE: "Automatic",
-              CODE_SIGN_IDENTITY: "Apple Development",
-              INFOPLIST_FILE: `${EXTENSION_NAME}/Info.plist`,
-              CODE_SIGN_ENTITLEMENTS: `${EXTENSION_NAME}/${EXTENSION_NAME}.entitlements`, // Add this!
+              INFOPLIST_FILE: `${appName}/${EXTENSION_NAME}/Info.plist`,
+              CODE_SIGN_ENTITLEMENTS: `${appName}/${EXTENSION_NAME}/${EXTENSION_NAME}.entitlements`,
               LD_RUNPATH_SEARCH_PATHS:
                 "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks",
-              ENABLE_BITCODE: "NO",
               SKIP_INSTALL: "YES",
             };
           }
@@ -133,7 +156,7 @@ function addBroadcastExtension(xcodeProject) {
     }
   }
 
-  // Add extension group and files
+  // Add extension files to project
   const extensionGroup = xcodeProject.addPbxGroup(
     [],
     EXTENSION_NAME,
@@ -141,79 +164,77 @@ function addBroadcastExtension(xcodeProject) {
   );
 
   // Add Swift file
-  const swiftFile = xcodeProject.addFile(
-    `${EXTENSION_NAME}/SampleHandler.swift`,
-    extensionGroup.uuid,
-    { lastKnownFileType: "sourcecode.swift" }
+  xcodeProject.addSourceFile(
+    `${appName}/${EXTENSION_NAME}/SampleHandler.swift`,
+    { target: targetUuid },
+    extensionGroup.uuid
   );
-  xcodeProject.addToPbxBuildFileSection(swiftFile);
-  xcodeProject.addToPbxSourcesBuildPhase(swiftFile);
 
   // Add Info.plist
-  xcodeProject.addFile(`${EXTENSION_NAME}/Info.plist`, extensionGroup.uuid, {
-    lastKnownFileType: "text.plist.xml",
-  });
+  xcodeProject.addFile(
+    `${appName}/${EXTENSION_NAME}/Info.plist`,
+    extensionGroup.uuid
+  );
+
+  // Add entitlements
+  xcodeProject.addFile(
+    `${appName}/${EXTENSION_NAME}/${EXTENSION_NAME}.entitlements`,
+    extensionGroup.uuid
+  );
 }
 
-async function configurePodfile(config) {
+async function fixPodfileForExtension(config) {
   const projectRoot = config.modRequest.projectRoot;
+  const appName = config.name;
   const podfilePath = path.join(projectRoot, "ios", "Podfile");
 
   if (!fs.existsSync(podfilePath)) {
-    console.warn("Podfile not found. It will be created during prebuild.");
+    console.log("Podfile not found, will be created during build");
     return;
   }
 
   let podfileContent = fs.readFileSync(podfilePath, "utf8");
 
-  if (!podfileContent.includes(`target '${EXTENSION_NAME}'`)) {
-    const extensionPodTarget = `
-target '${EXTENSION_NAME}' do
-  use_frameworks! :linkage => :static
-  pod 'GoogleWebRTC', '~> 1.1'
+  // Check if extension target already exists
+  if (podfileContent.includes(`target '${appName}-${EXTENSION_NAME}'`)) {
+    console.log("Extension target already exists in Podfile");
+    return;
+  }
+
+  // Find the main target end
+  const mainTargetRegex = new RegExp(
+    `target ['"]${appName}['"] do([\\s\\S]*?)^end`,
+    "gm"
+  );
+  const match = mainTargetRegex.exec(podfileContent);
+
+  if (!match) {
+    console.error("Could not find main target in Podfile");
+    return;
+  }
+
+  // Add extension target after the main target
+  const extensionTarget = `
+
+target '${appName}-${EXTENSION_NAME}' do
+  inherit! :search_paths
+  # Pods for BroadcastExtension
 end`;
 
-    // Add before post_install or at the end if no post_install
-    if (podfileContent.includes("post_install do |installer|")) {
-      podfileContent = podfileContent.replace(
-        /post_install do \|installer\|/,
-        extensionPodTarget + "\n\npost_install do |installer|"
-      );
-    } else {
-      // Add at the end before the final 'end'
-      const lastEndIndex = podfileContent.lastIndexOf("\nend");
-      podfileContent =
-        podfileContent.slice(0, lastEndIndex) +
-        "\n" +
-        extensionPodTarget +
-        "\n" +
-        podfileContent.slice(lastEndIndex);
-    }
+  const insertPosition = match.index + match[0].length;
+  podfileContent =
+    podfileContent.slice(0, insertPosition) +
+    extensionTarget +
+    podfileContent.slice(insertPosition);
 
-    // Ensure extension signing in post_install
-    if (!podfileContent.includes("config.build_settings['DEVELOPMENT_TEAM']")) {
-      const postInstallAddition = `
-      # Configure extension signing
-      if target.name == '${EXTENSION_NAME}'
-        target.build_configurations.each do |config|
-          config.build_settings['DEVELOPMENT_TEAM'] = '${TEAM_ID}'
-          config.build_settings['CODE_SIGN_STYLE'] = 'Automatic'
-        end
-      end`;
-
-      podfileContent = podfileContent.replace(
-        "installer.pods_project.targets.each do |target|",
-        "installer.pods_project.targets.each do |target|" + postInstallAddition
-      );
-    }
-
-    fs.writeFileSync(podfilePath, podfileContent);
-  }
+  fs.writeFileSync(podfilePath, podfileContent);
+  console.log("Updated Podfile with BroadcastExtension target");
 }
 
 async function createExtensionFiles(config) {
   const projectRoot = config.modRequest.projectRoot;
-  const extensionPath = path.join(projectRoot, "ios", EXTENSION_NAME);
+  const appName = config.name;
+  const extensionPath = path.join(projectRoot, "ios", appName, EXTENSION_NAME);
 
   if (!fs.existsSync(extensionPath)) {
     fs.mkdirSync(extensionPath, { recursive: true });
@@ -253,7 +274,7 @@ async function createExtensionFiles(config) {
 </plist>`
   );
 
-  // Entitlements file (CRITICAL for signing)
+  // Entitlements
   fs.writeFileSync(
     path.join(extensionPath, `${EXTENSION_NAME}.entitlements`),
     `<?xml version="1.0" encoding="UTF-8"?>
@@ -272,154 +293,29 @@ async function createExtensionFiles(config) {
   fs.writeFileSync(
     path.join(extensionPath, "SampleHandler.swift"),
     `import ReplayKit
-import WebRTC
-
-struct SignalMessage: Codable {
-    let type: String
-    let sdp: String?
-    let candidate: Candidate?
-}
-
-struct Candidate: Codable {
-    let sdp: String
-    let sdpMLineIndex: Int32
-    let sdpMid: String?
-}
-
-class SignalingClient {
-    private var webSocket: URLSessionWebSocketTask?
-    var onReceiveSdp: ((RTCSessionDescription) -> Void)?
-    var onReceiveCandidate: ((RTCIceCandidate) -> Void)?
-
-    func connect(url: URL) {
-        let session = URLSession(configuration: .default)
-        webSocket = session.webSocketTask(with: url)
-        webSocket?.resume()
-        receive()
-    }
-
-    func send(sdp: RTCSessionDescription) {
-        let message = SignalMessage(type: sdp.type == .offer ? "offer" : "answer", sdp: sdp.sdp, candidate: nil)
-        if let data = try? JSONEncoder().encode(message) {
-            webSocket?.send(.data(data)) { _ in }
-        }
-    }
-
-    func send(candidate: RTCIceCandidate) {
-        let cand = Candidate(sdp: candidate.sdp, sdpMLineIndex: candidate.sdpMLineIndex, sdpMid: candidate.sdpMid)
-        let message = SignalMessage(type: "candidate", sdp: nil, candidate: cand)
-        if let data = try? JSONEncoder().encode(message) {
-            webSocket?.send(.data(data)) { _ in }
-        }
-    }
-
-    private func receive() {
-        webSocket?.receive { [weak self] result in
-            if case .success(let message) = result,
-               case .data(let data) = message,
-               let decoded = try? JSONDecoder().decode(SignalMessage.self, from: data) {
-                if decoded.type == "answer", let sdp = decoded.sdp {
-                    self?.onReceiveSdp?(RTCSessionDescription(type: .answer, sdp: sdp))
-                } else if decoded.type == "candidate", let cand = decoded.candidate {
-                    self?.onReceiveCandidate?(RTCIceCandidate(
-                        sdp: cand.sdp,
-                        sdpMLineIndex: cand.sdpMLineIndex,
-                        sdpMid: cand.sdpMid
-                    ))
-                }
-            }
-            self?.receive()
-        }
-    }
-    
-    func disconnect() {
-        webSocket?.cancel(with: .goingAway, reason: nil)
-    }
-}
 
 class SampleHandler: RPBroadcastSampleHandler {
     private let appGroup = "${APP_GROUP}"
-    private var peerConnection: RTCPeerConnection?
-    private var videoSource: RTCVideoSource?
-    private var videoTrack: RTCVideoTrack?
-    private let signalingClient = SignalingClient()
-    private var peerConnectionFactory: RTCPeerConnectionFactory?
 
     override func broadcastStarted(withSetupInfo setupInfo: [String : NSObject]?) {
-        guard let sharedDefaults = UserDefaults(suiteName: appGroup),
-              let serverUrlString = sharedDefaults.string(forKey: "signalingServer"),
-              let signalingUrl = URL(string: serverUrlString) else {
-            finishBroadcastWithError(NSError(domain: "NomadCast", code: -1))
-            return
-        }
+        super.broadcastStarted(withSetupInfo: setupInfo)
         
-        sharedDefaults.set(true, forKey: "broadcasting")
-        setupWebRTC()
-        signalingClient.connect(url: signalingUrl)
-        
-        signalingClient.onReceiveSdp = { [weak self] sdp in
-            self?.peerConnection?.setRemoteDescription(sdp) { _ in }
-        }
-        signalingClient.onReceiveCandidate = { [weak self] candidate in
-            self?.peerConnection?.add(candidate)
-        }
-    }
-
-    private func setupWebRTC() {
-        RTCInitializeSSL()
-        peerConnectionFactory = RTCPeerConnectionFactory()
-        
-        let config = RTCConfiguration()
-        config.iceServers = [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
-        
-        let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
-        peerConnection = peerConnectionFactory!.peerConnection(with: config, constraints: constraints, delegate: self)
-        
-        videoSource = peerConnectionFactory!.videoSource()
-        videoTrack = peerConnectionFactory!.videoTrack(with: videoSource!, trackId: "video0")
-        peerConnection?.add(videoTrack!, streamIds: ["stream0"])
-        
-        peerConnection?.offer(for: constraints) { [weak self] sdp, _ in
-            guard let sdp = sdp else { return }
-            self?.peerConnection?.setLocalDescription(sdp) { _ in
-                self?.signalingClient.send(sdp: sdp)
-            }
+        if let sharedDefaults = UserDefaults(suiteName: appGroup) {
+            sharedDefaults.set(true, forKey: "broadcasting")
+            sharedDefaults.synchronize()
         }
     }
 
     override func broadcastFinished() {
-        signalingClient.disconnect()
-        peerConnection?.close()
-        
         if let sharedDefaults = UserDefaults(suiteName: appGroup) {
             sharedDefaults.set(false, forKey: "broadcasting")
+            sharedDefaults.synchronize()
         }
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer, with sampleBufferType: RPSampleBufferType) {
-        guard sampleBufferType == .video,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
-              let videoSource = videoSource else { return }
-        
-        let timeStampNs = Int64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000_000)
-        let rtcPixelBuffer = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
-        let rtcVideoFrame = RTCVideoFrame(buffer: rtcPixelBuffer, rotation: ._0, timeStampNs: timeStampNs)
-        videoSource.capturer(nil, didCapture: rtcVideoFrame)
+        // Process sample buffer here
     }
-}
-
-extension SampleHandler: RTCPeerConnectionDelegate {
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange state: RTCPeerConnectionState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
-        signalingClient.send(candidate: candidate)
-    }
-    func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
-    func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
 }`
   );
 }
