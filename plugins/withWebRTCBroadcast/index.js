@@ -98,34 +98,37 @@ function addBroadcastExtension(xcodeProject) {
   for (const key in configurations) {
     const config = configurations[key];
     if (config && config.buildSettings && !key.endsWith("_comment")) {
-      // Check if this configuration belongs to our extension
-      const buildConfigList =
-        xcodeProject.pbxTargetByName(EXTENSION_NAME)?.buildConfigurationList;
-      if (
-        buildConfigList &&
-        config.buildSettings &&
-        xcodeProject
-          .pbxXCConfigurationList()
-          [buildConfigList]?.buildConfigurations?.some(
+      // Get the build configuration list for the extension
+      const extensionTarget = xcodeProject.pbxTargetByName(EXTENSION_NAME);
+      if (extensionTarget && extensionTarget.buildConfigurationList) {
+        const configList =
+          xcodeProject.pbxXCConfigurationList()[
+            extensionTarget.buildConfigurationList
+          ];
+        if (configList && configList.buildConfigurations) {
+          const isExtensionConfig = configList.buildConfigurations.some(
             (conf) => conf.value === key
-          )
-      ) {
-        config.buildSettings = {
-          ...config.buildSettings,
-          PRODUCT_BUNDLE_IDENTIFIER: EXTENSION_BUNDLE_ID,
-          PRODUCT_NAME: EXTENSION_NAME,
-          SWIFT_VERSION: "5.0",
-          TARGETED_DEVICE_FAMILY: "1,2",
-          IPHONEOS_DEPLOYMENT_TARGET: "14.0",
-          DEVELOPMENT_TEAM: TEAM_ID,
-          CODE_SIGN_STYLE: "Automatic",
-          CODE_SIGN_IDENTITY: "Apple Development",
-          INFOPLIST_FILE: `${EXTENSION_NAME}/Info.plist`,
-          LD_RUNPATH_SEARCH_PATHS:
-            "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks",
-          ENABLE_BITCODE: "NO",
-          SKIP_INSTALL: "YES",
-        };
+          );
+          if (isExtensionConfig) {
+            config.buildSettings = {
+              ...config.buildSettings,
+              PRODUCT_BUNDLE_IDENTIFIER: EXTENSION_BUNDLE_ID,
+              PRODUCT_NAME: EXTENSION_NAME,
+              SWIFT_VERSION: "5.0",
+              TARGETED_DEVICE_FAMILY: "1,2",
+              IPHONEOS_DEPLOYMENT_TARGET: "14.0",
+              DEVELOPMENT_TEAM: TEAM_ID,
+              CODE_SIGN_STYLE: "Automatic",
+              CODE_SIGN_IDENTITY: "Apple Development",
+              INFOPLIST_FILE: `${EXTENSION_NAME}/Info.plist`,
+              CODE_SIGN_ENTITLEMENTS: `${EXTENSION_NAME}/${EXTENSION_NAME}.entitlements`, // Add this!
+              LD_RUNPATH_SEARCH_PATHS:
+                "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks",
+              ENABLE_BITCODE: "NO",
+              SKIP_INSTALL: "YES",
+            };
+          }
+        }
       }
     }
   }
